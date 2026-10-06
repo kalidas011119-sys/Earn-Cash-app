@@ -21,6 +21,7 @@ export const TaskManagement: React.FC = () => {
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [taskToDelete, setTaskToDelete] = useState<Task | null>(null);
   const [deleteNotice, setDeleteNotice] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   // Form states
   const [name, setName] = useState('');
@@ -93,17 +94,22 @@ export const TaskManagement: React.FC = () => {
     setModalOpen(false);
   };
 
-  const openDeleteConfirm = (task: Task) => {
+  const openDeleteConfirm = (task: Task, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
     setTaskToDelete(task);
   };
 
   const confirmDelete = () => {
-    if (taskToDelete) {
+    if (taskToDelete && !isDeleting) {
+      setIsDeleting(true);
       const deletedName = taskToDelete.name;
-      dbService.deleteTask(taskToDelete.id, 'ADMIN_8471835378');
+      const res = dbService.deleteTask(taskToDelete.id, 'ADMIN_8471835378');
+      setIsDeleting(false);
       setTaskToDelete(null);
-      setDeleteNotice(`Task "${deletedName}" was deleted successfully.`);
-      setTimeout(() => setDeleteNotice(null), 3500);
+      if (res.success) {
+        setDeleteNotice(`Task "${deletedName}" was deleted successfully.`);
+        setTimeout(() => setDeleteNotice(null), 3500);
+      }
     }
   };
 
@@ -205,19 +211,22 @@ export const TaskManagement: React.FC = () => {
                   <td className="p-4 text-right">
                     <div className="flex items-center justify-end gap-2">
                       <button
+                        type="button"
                         onClick={() => openEditModal(task)}
-                        className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg transition"
+                        className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-xl transition flex items-center gap-1 font-bold text-xs"
                         title="Edit Task"
                       >
-                        <Edit2 className="w-4 h-4" />
+                        <Edit2 className="w-3.5 h-3.5" />
+                        <span className="hidden sm:inline">Edit</span>
                       </button>
                       <button
                         type="button"
-                        onClick={() => openDeleteConfirm(task)}
-                        className="p-1.5 bg-rose-950 hover:bg-rose-900 text-rose-400 rounded-lg transition border border-rose-800/50 cursor-pointer"
+                        onClick={(e) => openDeleteConfirm(task, e)}
+                        className="px-2.5 py-1.5 bg-rose-950/90 hover:bg-rose-900 text-rose-300 hover:text-white rounded-xl transition border border-rose-800/60 cursor-pointer flex items-center gap-1 font-bold text-xs shadow-xs"
                         title="Delete Task"
                       >
-                        <Trash2 className="w-4 h-4" />
+                        <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                        <span>Delete</span>
                       </button>
                     </div>
                   </td>
@@ -465,11 +474,12 @@ export const TaskManagement: React.FC = () => {
               </button>
               <button
                 type="button"
+                disabled={isDeleting}
                 onClick={confirmDelete}
-                className="flex-1 py-2.5 bg-rose-600 hover:bg-rose-500 text-white font-black rounded-xl text-xs transition shadow-lg shadow-rose-900/30 flex items-center justify-center gap-1.5 cursor-pointer"
+                className="flex-1 py-2.5 bg-rose-600 hover:bg-rose-500 text-white font-black rounded-xl text-xs transition shadow-lg shadow-rose-900/30 flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
               >
                 <Trash2 className="w-3.5 h-3.5" />
-                <span>Yes, Delete Task</span>
+                <span>{isDeleting ? 'Deleting...' : 'Yes, Delete Task'}</span>
               </button>
             </div>
           </div>

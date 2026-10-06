@@ -18,7 +18,7 @@
   <!-- Firebase SDK ESM script -->
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.9.0/firebase-app.js";
-    import { getFirestore, doc, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/10.9.0/firebase-firestore.js";
+    import { getFirestore, doc, setDoc, getDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.9.0/firebase-firestore.js";
 
     const firebaseConfig = {
       apiKey: "AIzaSyCZs9L6W06MtOytPRxGnC3GbCVezcZpZ_8",
@@ -33,6 +33,36 @@
     const fbApp = initializeApp(firebaseConfig);
     const firestore = getFirestore(fbApp);
     window.firestore = firestore;
+
+    window.saveStateToFirebase = async function(state) {
+      try {
+        await setDoc(doc(firestore, "earncash_data", "main_state"), { ...state, isInitialized: true });
+      } catch (err) {
+        console.warn("Firebase sync write error:", err);
+      }
+    };
+
+    // Initial fetch and real-time listener to sync tasks across all devices
+    const docRef = doc(firestore, "earncash_data", "main_state");
+    getDoc(docRef).then((snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        if (data && (data.isInitialized || Array.isArray(data.tasks))) {
+          localStorage.setItem('earncash_db_state_v1', JSON.stringify(data));
+          if (window.renderAdmin) window.renderAdmin();
+        }
+      }
+    }).catch(err => console.warn(err));
+
+    onSnapshot(docRef, (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        if (data && (data.isInitialized || Array.isArray(data.tasks))) {
+          localStorage.setItem('earncash_db_state_v1', JSON.stringify(data));
+          if (window.renderAdmin) window.renderAdmin();
+        }
+      }
+    }, (err) => console.warn("Firestore listener error:", err));
   </script>
 
   <!-- Admin Panel Application Logic -->
@@ -77,6 +107,9 @@
     function saveState(state) {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       SYNC_BUS.postMessage({ type: 'STATE_UPDATED' });
+      if (window.saveStateToFirebase) {
+        window.saveStateToFirebase(state);
+      }
       renderAdmin();
     }
 
@@ -85,8 +118,7 @@
       if (e.key === STORAGE_KEY) renderAdmin();
     });
 
-    function addAuditLog(action, target, details) {
-      const state = getState();
+    function addAuditLog(state, action, target, details) {
       state.auditLogs = state.auditLogs || [];
       state.auditLogs.unshift({
         id: 'LOG_' + Date.now(),
@@ -96,7 +128,6 @@
         details,
         timestamp: new Date().toISOString()
       });
-      saveState(state);
     }
 
     window.handleAdminLogin = function(e) {
@@ -376,12 +407,14 @@
     }
 
     window.deleteTaskDirect = function(taskId) {
+      if (!confirm("Are you sure you want to delete this task?")) return;
       const state = getState();
-      const task = state.tasks.find(t => t.id === taskId);
+      const task = (state.tasks || []).find(t => t.id === taskId);
       const name = task ? task.name : taskId;
-      state.tasks = state.tasks.filter(t => t.id !== taskId);
-      addAuditLog('DELETE_TASK', taskId, `Deleted task "${name}"`);
+      state.tasks = (state.tasks || []).filter(t => t.id !== taskId);
+      addAuditLog(state, 'DELETE_TASK', taskId, `Deleted task "${name}"`);
       saveState(state);
+      renderAdmin();
     };
 
     window.openAddTaskModal = function() {
@@ -407,13 +440,14 @@
         isReferralEligible: true,
         createdAt: new Date().toISOString()
       });
-      addAuditLog('CREATE_TASK', name, `Created task with reward ₹${reward}`);
+      addAuditLog(state, 'CREATE_TASK', name, `Created task with reward ₹${reward}`);
       saveState(state);
+      renderAdmin();
     };
 
     window.approveSub = function(subId) {
       const state = getState();
-      const sub = state.submissions.find(s => s.id === subId);
+      const sub = (state.submissions || []).find(s => s.id === subId);
       if (!sub || sub.status === 'approved') return;
 
       sub.status = 'approved';
@@ -425,6 +459,7 @@
         wallet.balance += sub.taskReward;
         wallet.totalEarned += sub.taskReward;
         wallet.completedTaskCount += 1;
+        state.transactions = state.transactions || [];
         state.transactions.unshift({
           id: 'TXN_' + Date.now(),
           uid: sub.uid,
@@ -437,35 +472,38 @@
         });
       }
 
-      addAuditLog('APPROVE_SUBMISSION', sub.id, `Approved submission and credited ₹${sub.taskReward} to ${sub.uid}`);
+      addAuditLog(state, 'APPROVE_SUBMISSION', sub.id, `Approved submission and credited ₹${sub.taskReward} to ${sub.uid}`);
       saveState(state);
+      renderAdmin();
     };
 
     window.rejectSub = function(subId) {
       const reason = prompt('Enter rejection reason:') || 'Proof verification failed';
       const state = getState();
-      const sub = state.submissions.find(s => s.id === subId);
+      const sub = (state.submissions || []).find(s => s.id === subId);
       if (!sub) return;
 
       sub.status = 'rejected';
       sub.rejectionReason = reason;
-      addAuditLog('REJECT_SUBMISSION', sub.id, `Rejected: ${reason}`);
+      addAuditLog(state, 'REJECT_SUBMISSION', sub.id, `Rejected: ${reason}`);
       saveState(state);
+      renderAdmin();
     };
 
     window.completeWithdraw = function(wId) {
       const state = getState();
-      const w = state.withdrawals.find(x => x.id === wId);
+      const w = (state.withdrawals || []).find(x => x.id === wId);
       if (!w) return;
       w.status = 'completed';
-      addAuditLog('WITHDRAWAL_COMPLETED', w.id, `Payout ₹${w.amount} transferred to ${w.uid}`);
+      addAuditLog(state, 'WITHDRAWAL_COMPLETED', w.id, `Payout ₹${w.amount} transferred to ${w.uid}`);
       saveState(state);
+      renderAdmin();
     };
 
     window.rejectWithdraw = function(wId) {
       const reason = prompt('Enter rejection reason:') || 'Bank account invalid';
       const state = getState();
-      const w = state.withdrawals.find(x => x.id === wId);
+      const w = (state.withdrawals || []).find(x => x.id === wId);
       if (!w || w.status === 'rejected') return;
 
       w.status = 'rejected';
@@ -474,6 +512,7 @@
       const wallet = state.wallets[w.uid];
       if (wallet) {
         wallet.balance += w.amount;
+        state.transactions = state.transactions || [];
         state.transactions.unshift({
           id: 'TXN_' + Date.now(),
           uid: w.uid,
@@ -485,8 +524,9 @@
         });
       }
 
-      addAuditLog('WITHDRAWAL_REJECTED', w.id, `Rejected and refunded ₹${w.amount} to user ${w.uid}`);
+      addAuditLog(state, 'WITHDRAWAL_REJECTED', w.id, `Rejected and refunded ₹${w.amount} to user ${w.uid}`);
       saveState(state);
+      renderAdmin();
     };
 
     renderAdmin();

@@ -13,8 +13,9 @@ import {
   AuditLog,
   BankDetails
 } from '../types';
-import { db } from './firebase';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { db, rtdb } from './firebase';
+import { doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore';
+import { ref as dbRef, set as rtdbSet, onValue, get as rtdbGet } from 'firebase/database';
 
 const STORAGE_KEY = 'earncash_db_state_v1';
 const SYNC_CHANNEL = 'earncash_sync_bus';
@@ -332,6 +333,8 @@ class DatabaseService {
   private channel: BroadcastChannel | null = null;
   private listeners: Set<() => void> = new Set();
   private isSyncingWithFirebase = false;
+  private syncQueue = false;
+  private hasLoadedRemote = false;
 
   constructor() {
     this.state = this.loadState();
@@ -355,7 +358,7 @@ class DatabaseService {
       });
     }
 
-    // Try background sync with Firebase Firestore
+    // Connect to Firebase Firestore & RTDB immediately
     this.syncFromFirebase();
   }
 
@@ -437,36 +440,147 @@ class DatabaseService {
   }
 
   private async syncToFirebase() {
-    if (!db || this.isSyncingWithFirebase) return;
+    if (this.isSyncingWithFirebase) {
+      this.syncQueue = true;
+      return;
+    }
+    this.isSyncingWithFirebase = true;
     try {
-      this.isSyncingWithFirebase = true;
-      const ref = doc(db, 'app_sync', 'shared_state');
-      // Store a lightweight sync checkpoint or full snapshot
-      await setDoc(ref, {
-        tasksCount: this.state.tasks.length,
-        submissionsCount: this.state.submissions.length,
-        usersCount: Object.keys(this.state.users).length,
-        updatedAt: new Date().toISOString()
-      }, { merge: true });
+      do {
+        this.syncQueue = false;
+        const payload = {
+          isInitialized: true,
+          users: this.state.users || {},
+          wallets: this.state.wallets || {},
+          transactions: this.state.transactions || [],
+          tasks: this.state.tasks || [],
+          taskStarts: this.state.taskStarts || [],
+          submissions: this.state.submissions || [],
+          referrals: this.state.referrals || [],
+          withdrawals: this.state.withdrawals || [],
+          banners: this.state.banners || [],
+          notifications: this.state.notifications || [],
+          settings: this.state.settings || DEFAULT_SETTINGS,
+          auditLogs: this.state.auditLogs || [],
+          lastUpdated: new Date().toISOString()
+        };
+
+        if (db) {
+          const firestoreRef = doc(db, 'earncash_data', 'main_state');
+          await setDoc(firestoreRef, payload);
+        }
+
+        if (rtdb) {
+          const rtdbRef = dbRef(rtdb, 'earncash_main_state');
+          await rtdbSet(rtdbRef, payload);
+        }
+      } while (this.syncQueue);
     } catch (e) {
-      // Offline or permission notice (handled silently)
+      console.warn('Firebase sync write error:', e);
     } finally {
       this.isSyncingWithFirebase = false;
     }
   }
 
   private async syncFromFirebase() {
-    if (!db) return;
-    try {
-      const ref = doc(db, 'app_sync', 'shared_state');
-      const snap = await getDoc(ref);
-      if (snap.exists()) {
-        // Connected to Firebase Firestore successfully
-        console.log('Firebase Firestore live sync established.');
+    if (db) {
+      try {
+        const firestoreRef = doc(db, 'earncash_data', 'main_state');
+        const snap = await getDoc(firestoreRef);
+        if (snap.exists()) {
+          const remoteData = snap.data();
+          if (remoteData && (remoteData.isInitialized || Array.isArray(remoteData.tasks))) {
+            this.applyRemoteState(remoteData);
+          } else {
+            // First time initialization in Firebase
+            await this.syncToFirebase();
+          }
+        } else {
+          // Document does not exist yet, seed current state to Firebase
+          await this.syncToFirebase();
+        }
+
+        // Real-time listener for any updates from Admin Panel or User Panel across any browser/device
+        onSnapshot(firestoreRef, (snapshot) => {
+          if (snapshot.exists()) {
+            const data = snapshot.data();
+            if (data && (data.isInitialized || Array.isArray(data.tasks))) {
+              this.applyRemoteState(data);
+            }
+          }
+        }, (err) => {
+          console.warn('Firestore onSnapshot listener notice:', err);
+        });
+      } catch (e) {
+        console.warn('Firestore initial sync notice:', e);
       }
-    } catch (e) {
-      console.log('Running in synchronized high-speed state with Firestore standby.');
     }
+
+    if (rtdb) {
+      try {
+        const rtdbReference = dbRef(rtdb, 'earncash_main_state');
+        const rtdbSnap = await rtdbGet(rtdbReference);
+        if (rtdbSnap.exists()) {
+          const val = rtdbSnap.val();
+          if (val && (val.isInitialized || Array.isArray(val.tasks)) && !this.hasLoadedRemote) {
+            this.applyRemoteState(val);
+          }
+        }
+
+        onValue(rtdbReference, (snap) => {
+          if (snap.exists()) {
+            const val = snap.val();
+            if (val && (val.isInitialized || Array.isArray(val.tasks))) {
+              this.applyRemoteState(val);
+            }
+          }
+        }, (err) => {
+          console.warn('RTDB onValue notice:', err);
+        });
+      } catch (e) {
+        console.warn('RTDB sync notice:', e);
+      }
+    }
+  }
+
+  private applyRemoteState(remoteData: any) {
+    if (!remoteData) return;
+    this.hasLoadedRemote = true;
+
+    const newTasks = Array.isArray(remoteData.tasks) ? remoteData.tasks : this.state.tasks;
+    const newBanners = Array.isArray(remoteData.banners) ? remoteData.banners : this.state.banners;
+    const newNotifications = Array.isArray(remoteData.notifications) ? remoteData.notifications : this.state.notifications;
+    const newSubmissions = Array.isArray(remoteData.submissions) ? remoteData.submissions : this.state.submissions;
+    const newWithdrawals = Array.isArray(remoteData.withdrawals) ? remoteData.withdrawals : this.state.withdrawals;
+    const newReferrals = Array.isArray(remoteData.referrals) ? remoteData.referrals : this.state.referrals;
+    const newTransactions = Array.isArray(remoteData.transactions) ? remoteData.transactions : this.state.transactions;
+    const newAuditLogs = Array.isArray(remoteData.auditLogs) ? remoteData.auditLogs : this.state.auditLogs;
+    const newSettings = remoteData.settings ? { ...DEFAULT_SETTINGS, ...remoteData.settings } : this.state.settings;
+    const newUsers = remoteData.users ? { ...this.state.users, ...remoteData.users } : this.state.users;
+    const newWallets = remoteData.wallets ? { ...this.state.wallets, ...remoteData.wallets } : this.state.wallets;
+
+    this.state = {
+      users: newUsers,
+      wallets: newWallets,
+      transactions: newTransactions,
+      tasks: newTasks,
+      taskStarts: Array.isArray(remoteData.taskStarts) ? remoteData.taskStarts : this.state.taskStarts,
+      submissions: newSubmissions,
+      referrals: newReferrals,
+      withdrawals: newWithdrawals,
+      banners: newBanners,
+      notifications: newNotifications,
+      settings: newSettings,
+      auditLogs: newAuditLogs
+    };
+
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(this.state));
+      } catch (e) {}
+    }
+
+    this.notify();
   }
 
   public subscribe(cb: () => void): () => void {

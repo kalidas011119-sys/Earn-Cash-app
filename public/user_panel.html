@@ -149,7 +149,7 @@
   <!-- Firebase SDK ESM script -->
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.9.0/firebase-app.js";
-    import { getFirestore, doc, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/10.9.0/firebase-firestore.js";
+    import { getFirestore, doc, setDoc, getDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.9.0/firebase-firestore.js";
 
     const firebaseConfig = {
       apiKey: "AIzaSyCZs9L6W06MtOytPRxGnC3GbCVezcZpZ_8",
@@ -163,9 +163,27 @@
 
     const fbApp = initializeApp(firebaseConfig);
     const firestore = getFirestore(fbApp);
-
-    // Expose Firebase instance
     window.firestore = firestore;
+
+    window.saveStateToFirebase = async function(state) {
+      try {
+        await setDoc(doc(firestore, "earncash_data", "main_state"), state, { merge: true });
+      } catch (err) {
+        console.warn("Firebase sync write error:", err);
+      }
+    };
+
+    // Attach real-time listener to load and sync tasks across all devices
+    const docRef = doc(firestore, "earncash_data", "main_state");
+    onSnapshot(docRef, (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        if (data && Array.isArray(data.tasks)) {
+          localStorage.setItem('earncash_db_state_v1', JSON.stringify(data));
+          if (window.renderApp) window.renderApp();
+        }
+      }
+    }, (err) => console.warn("Firestore listener error:", err));
   </script>
 
   <!-- Core User Panel Application Logic -->
@@ -212,6 +230,9 @@
     function saveState(state) {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       SYNC_BUS.postMessage({ type: 'STATE_UPDATED' });
+      if (window.saveStateToFirebase) {
+        window.saveStateToFirebase(state);
+      }
       renderApp();
     }
 
